@@ -207,9 +207,16 @@ $('btn-bulk').addEventListener('click', async () => {
 
 async function loadVersions({ keepSelection = true } = {}) {
   const prev = $('version-select').value;
+  const prevA = $('cmp-version-a').value;
+  const prevB = $('cmp-version-b').value;
   state.versions = await api('GET', '/api/versions');
   renderVersions();
   renderVersionOptions(keepSelection ? prev : null);
+  renderCompareOptions();
+  if (keepSelection) {
+    if (state.versions.some((v) => String(v.id) === String(prevA))) $('cmp-version-a').value = prevA;
+    if (state.versions.some((v) => String(v.id) === String(prevB))) $('cmp-version-b').value = prevB;
+  }
 }
 
 function renderVersions() {
@@ -438,6 +445,97 @@ function renderPlayer() {
     .join('');
 }
 
+/* ----------------------------- 版本比对 ----------------------------- */
+
+function renderCompareOptions() {
+  const make = (sel) => {
+    if (state.versions.length === 0) {
+      sel.innerHTML = '<option value="">— 暂无已发布版本 —</option>';
+      return;
+    }
+    sel.innerHTML = state.versions
+      .map((v) => `<option value="${v.id}">#${v.id} ${esc(v.label)}</option>`)
+      .join('');
+  };
+  make($('cmp-version-a'));
+  make($('cmp-version-b'));
+  // 默认 A 选最新、B 选次新（或相同版本）
+  if (state.versions.length > 0) $('cmp-version-a').value = String(state.versions[0].id);
+  if (state.versions.length > 1) $('cmp-version-b').value = String(state.versions[1].id);
+}
+
+function intervalText(iv) {
+  // [含端点 / (不含端点；start=end 表示仅该瞬间超差的零长度闭区间
+  const s = iv.start_inclusive ? '[' : '(';
+  const e = iv.end_inclusive ? ']' : ')';
+  return `${s}${fmt(iv.start)}, ${fmt(iv.end)}${e}`;
+}
+
+$('form-compare').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  clearErr($('compare-error'));
+  const body = {
+    version_a: $('cmp-version-a').value,
+    version_b: $('cmp-version-b').value,
+    start: $('cmp-start').value,
+    end: $('cmp-end').value,
+    at: $('cmp-at').value,
+    threshold: $('cmp-threshold').value,
+  };
+  try {
+    const d = await api('POST', '/api/compare', body);
+    renderCompare(d);
+  } catch (err) {
+    $('compare-result').hidden = true;
+    showErr($('compare-error'), '比对失败：' + err.message);
+  }
+});
+
+function renderCompare(d) {
+  $('compare-result').hidden = false;
+  $('cmp-at-title').textContent =
+    `查看时刻 t = ${fmt(d.at)} s：两版逐灯亮度（阈值 ${fmt(d.threshold)}）`;
+
+  // 逐灯亮度
+  $('cmp-levels').querySelector('tbody').innerHTML = d.levels
+    .map((r) => `
+      <tr class="${r.exceeds ? 'cmp-hot' : ''}">
+        <td>#${r.light_id} ${esc(r.name)}</td>
+        <td>${fmt(r.brightness_a)}</td>
+        <td>${fmt(r.brightness_b)}</td>
+        <td>${fmt(r.difference)}</td>
+        <td>${r.exceeds ? '<span class="badge fading">超差</span>' : '<span class="badge done">否</span>'}</td>
+      </tr>`)
+    .join('');
+
+  // 区间
+  const zeroWindow = d.window.start === d.window.end;
+  $('cmp-window-note').textContent = zeroWindow
+    ? `零长度时窗 [${fmt(d.window.start)}, ${fmt(d.window.end)}]：仅返回该时刻亮度，不产生区间。`
+    : `时窗 [${fmt(d.window.start)}, ${fmt(d.window.end)}] 秒，区间端点含 [ ] / 不含 ( )。`;
+  $('cmp-intervals').querySelector('tbody').innerHTML = d.intervals
+    .map((g) => `
+      <tr>
+        <td>#${g.light_id} ${esc(g.name)}</td>
+        <td class="cmp-iv-list">${g.intervals.map(intervalText).map(esc).join('，')}</td>
+        <td>${g.intervals.length}</td>
+      </tr>`)
+    .join('');
+  $('cmp-no-diff').hidden = d.intervals.length > 0;
+
+  // 配置差异
+  const renderOnly = (list, label, cls) =>
+    list.length
+      ? `<div class="cmp-cfg-group ${cls}"><b>${label}（${list.length}）</b>：` +
+        list.map((l) => `#${l.light_id} ${esc(l.name)}`).join('、') +
+        '</div>'
+      : '';
+  const cfgHtml =
+    renderOnly(d.config_differences.only_in_a, `仅存在于版本 A（#${d.versions.a.id}）`, 'only-a') +
+    renderOnly(d.config_differences.only_in_b, `仅存在于版本 B（#${d.versions.b.id}）`, 'only-b');
+  $('cmp-config').innerHTML = cfgHtml || '<p class="muted">两版灯具配置一致。</p>';
+}
+
 /* ----------------------------- 启动 ----------------------------- */
 
 (async function init() {
@@ -452,6 +550,7 @@ function renderPlayer() {
     renderCues();
     renderVersions();
     renderVersionOptions(null);
+    renderCompareOptions();
     if (state.versions.length > 0) {
       await loadSession(state.versions[0].id, true); // 默认加载最新版本，停在 0 秒
     } else {

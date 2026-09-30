@@ -3,6 +3,7 @@
 const path = require('path');
 const express = require('express');
 const { open, get } = require('./src/db');
+const Engine = require('./public/engine');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'data', 'app.db');
@@ -318,6 +319,121 @@ app.get('/api/versions/:id', (req, res) => {
   if (!snap) return err(res, 404, '版本不存在');
   res.json(snap);
 });
+
+/* --------------------------- 两版亮度差比对 ---------------------------- */
+// 只读已发布快照：不触碰草稿 Cue/灯具，也不影响任何播放会话。
+// GET（query，方便直接调用/分享链接）与 POST（JSON body）均支持，同一套校验。
+
+function round6(n) {
+  const r = Math.round(n * 1e6) / 1e6;
+  return r === 0 ? 0 : r;
+}
+
+function handleCompare(req, res) {
+  const input = { ...req.query, ...(req.body || {}) };
+
+  // 版本编号：正整数且必须存在（相同版本可与自身比较）
+  const ids = {};
+  for (const key of ['a', 'b']) {
+    const field = `version_${key}`;
+    const id = toPosInt(input[field]);
+    if (Number.isNaN(id)) {
+      return err(res, 400, `版本编号无效：${JSON.stringify(input[field])}（须为正整数）`);
+    }
+    ids[key] = id;
+  }
+  const snapA = loadVersionSnapshot(ids.a);
+  if (!snapA) return err(res, 404, `版本不存在：#${ids.a}`);
+  const snapB = ids.b === ids.a ? snapA : loadVersionSnapshot(ids.b);
+  if (!snapB) return err(res, 404, `版本不存在：#${ids.b}`);
+
+  // 时窗起止 / 查看时刻：非负数字
+  const nums = {};
+  const numFields = { start: '时窗起点', end: '时窗终点', at: '查看时刻' };
+  for (const field of ['start', 'end', 'at']) {
+    const n = toNum(input[field]);
+    if (Number.isNaN(n)) {
+      return err(res, 400, `${numFields[field]}无效：${JSON.stringify(input[field])}（须为非负数字秒数）`);
+    }
+    if (n < 0) {
+      return err(res, 400, `${numFields[field]}无效：${n}（不得为负）`);
+    }
+    nums[field] = n;
+  }
+  if (nums.start > nums.end) {
+    return err(res, 400, `时窗起点（${nums.start}）不能大于终点（${nums.end}）`);
+  }
+  if (nums.at < nums.start || nums.at > nums.end) {
+    return err(
+      res,
+      400,
+      `查看时刻 ${nums.at} 超出时窗 [${nums.start}, ${nums.end}]`
+    );
+  }
+
+  // 亮度差阈值：0～100
+  const threshold = toNum(input.threshold);
+  if (Number.isNaN(threshold)) {
+    return err(res, 400, `亮度差阈值无效：${JSON.stringify(input.threshold)}（须为 0～100 的数字）`);
+  }
+  if (threshold < 0 || threshold > 100) {
+    return err(res, 400, `亮度差阈值越界：${threshold}（须在 0～100 之间）`);
+  }
+
+  const cuesA = Engine.prepareCues(snapA.cues);
+  const cuesB = Engine.prepareCues(snapB.cues);
+  const mapA = new Map(snapA.lights.map((l) => [l.id, l.name]));
+  const mapB = new Map(snapB.lights.map((l) => [l.id, l.name]));
+  const commonIds = [...mapA.keys()].filter((id) => mapB.has(id)).sort((x, y) => x - y);
+
+  const levels = [];
+  const intervals = [];
+  for (const id of commonIds) {
+    const va = Engine.brightnessAt(cuesA, id, nums.at);
+    const vb = Engine.brightnessAt(cuesB, id, nums.at);
+    const diff = Math.abs(va - vb);
+    levels.push({
+      light_id: id,
+      name: mapA.get(id),
+      brightness_a: round6(va),
+      brightness_b: round6(vb),
+      difference: round6(diff),
+      exceeds: diff > threshold + 1e-9,
+    });
+    // 零长度时窗：只返回该时刻亮度，不产生任何区间
+    const segs =
+      nums.end > nums.start
+        ? Engine.differenceIntervals(cuesA, cuesB, id, nums.start, nums.end, threshold)
+        : [];
+    if (segs.length > 0) intervals.push({ light_id: id, name: mapA.get(id), intervals: segs });
+  }
+
+  // 配置差异：仅在一版存在的灯具单列；缺失不等于熄灭，不参与逐灯亮度比较
+  const onlyA = [...mapA.keys()]
+    .filter((id) => !mapB.has(id))
+    .sort((x, y) => x - y)
+    .map((id) => ({ light_id: id, name: mapA.get(id) }));
+  const onlyB = [...mapB.keys()]
+    .filter((id) => !mapA.has(id))
+    .sort((x, y) => x - y)
+    .map((id) => ({ light_id: id, name: mapB.get(id) }));
+
+  res.json({
+    versions: {
+      a: { id: snapA.id, label: snapA.label },
+      b: { id: snapB.id, label: snapB.label },
+    },
+    window: { start: nums.start, end: nums.end },
+    at: nums.at,
+    threshold,
+    levels,
+    intervals,
+    config_differences: { only_in_a: onlyA, only_in_b: onlyB },
+  });
+}
+
+app.get('/api/compare', handleCompare);
+app.post('/api/compare', handleCompare);
 
 /* ------------------------------- 错误处理 ------------------------------ */
 

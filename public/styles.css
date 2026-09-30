@@ -187,3 +187,10 @@ tr.done td { color: var(--muted); }
 .badge.waiting { color: #6f7290; }
 
 code { background: #14121d; padding: .1rem .35rem; border-radius: 4px; color: var(--amber-soft); }
+
+/* 版本比对 */
+tr.cmp-hot td { color: var(--amber-soft); }
+.cmp-iv-list { font-variant-numeric: tabular-nums; white-space: normal; }
+.cmp-cfg-group { margin: .35rem 0; font-size: .88rem; }
+.cmp-cfg-group.only-a b { color: var(--ok); }
+.cmp-cfg-group.only-b b { color: var(--amber); }
